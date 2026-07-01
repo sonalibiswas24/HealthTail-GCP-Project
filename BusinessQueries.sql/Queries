@@ -1,0 +1,195 @@
+/* YOY growth of the Clinic*/
+
+WITH
+  yearly AS (
+    SELECT
+      EXTRACT(YEAR FROM visit_date) AS year,
+      COUNT(*) AS total_visits,
+      COUNT(DISTINCT patient_id) AS unique_patients,
+      COUNT(DISTINCT doctor) AS active_doctors,
+      ROUND(SUM(med_cost), 2) AS total_revenue,
+      ROUND(AVG(med_cost), 2) AS avg_cost_per_visit
+    FROM `project-38fcb11f-322f-4c8e-bd0.Clinipet_Integration.Visit_clean`
+    GROUP BY year
+  )
+SELECT
+  year,
+  total_visits,
+  unique_patients,
+  active_doctors,
+  total_revenue,
+  avg_cost_per_visit,
+  ROUND(
+    100
+      * (total_revenue - LAG(total_revenue) OVER (ORDER BY year))
+      / LAG(total_revenue) OVER (ORDER BY year),
+    1) AS revenue_yoy_pct,
+  ROUND(
+    100
+      * (total_visits - LAG(total_visits) OVER (ORDER BY year))
+      / LAG(total_visits) OVER (ORDER BY year),
+    1) AS visits_yoy_pct
+FROM yearly
+ORDER BY year;
+
+/* -- Patient Growth*/
+
+WITH
+  monthly_counts AS (
+    SELECT
+      DATE_TRUNC(date_registration, MONTH) AS month,
+      COUNT(*) AS new_patients
+    FROM
+      `project-38fcb11f-322f-4c8e-bd0.Clinipet_Integration.Registration_clean`
+    GROUP BY month
+  )
+SELECT
+  month,
+  new_patients,
+  SUM(new_patients)
+    OVER (
+      ORDER BY month
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS cumulative_patients
+FROM monthly_counts
+ORDER BY month;
+
+/* -- Medication Expenses trend*/
+
+SELECT
+  FORMAT_DATE('%Y-%m', invoice_month) AS month,
+  ROUND(SUM(total_price), 2) AS med_spend
+FROM `project-38fcb11f-322f-4c8e-bd0.Clinipet_Integration.Invoices_clean`
+GROUP BY FORMAT_DATE('%Y-%m', invoice_month)
+ORDER BY month;
+
+/* -- Acquisition vs. spend on med*/
+WITH
+  patients AS (
+    SELECT
+      FORMAT_DATE('%Y-%m', date_registration) AS month, COUNT(*) AS new_patients
+    FROM
+      `project-38fcb11f-322f-4c8e-bd0.Clinipet_Integration.Registration_clean`
+    GROUP BY month
+  ),
+  spend AS (
+    SELECT
+      FORMAT_DATE('%Y-%m', invoice_month) AS month,
+      ROUND(SUM(total_price), 2) AS med_spend
+    FROM `project-38fcb11f-322f-4c8e-bd0.Clinipet_Integration.Invoices_clean`
+    GROUP BY month
+  )
+SELECT
+  COALESCE(p.month, s.month) AS month,
+  COALESCE(p.new_patients, 0) AS new_patients,
+  COALESCE(s.med_spend, 0) AS med_spend,
+  ROUND(SAFE_DIVIDE(s.med_spend, NULLIF(p.new_patients, 0)), 2)
+    AS spend_per_new_patient
+FROM patients p
+FULL OUTER JOIN spend s
+  USING (month)
+ORDER BY month;
+
+/* -- Patients we acquire*/
+SELECT
+  pet_type,
+  breed,
+  COUNT(*) AS patients,
+  ROUND(AVG(patient_age), 1) AS avg_age
+FROM `project-38fcb11f-322f-4c8e-bd0.Clinipet_Integration.Registration_clean`
+GROUP BY pet_type, breed
+ORDER BY patients DESC
+LIMIT 10;
+
+/* -- Supplier Spent*/
+SELECT
+  supplier,
+  ROUND(SUM(total_price), 2) AS total_spend,
+  ROUND(100 * SUM(total_price) / SUM(SUM(total_price)) OVER (), 1)
+    AS pct_of_total_spend
+FROM `project-38fcb11f-322f-4c8e-bd0.Clinipet_Integration.Invoices_clean`
+GROUP BY supplier
+ORDER BY total_spend DESC;
+
+/*-- 1. patient with their most frequent diagnosis and most frequently prescribed medication*/
+
+WITH
+  diagnosis_counts AS (
+    SELECT
+      patient_id,
+      diagnosis,
+      COUNT(*) AS diagnosis_count,
+      ROW_NUMBER() OVER (PARTITION BY patient_id ORDER BY COUNT(*) DESC) AS rnk
+    FROM `project-38fcb11f-322f-4c8e-bd0.Clinipet_Integration.Visit_clean`
+    GROUP BY patient_id, diagnosis
+  ),
+  med_counts AS (
+    SELECT
+      patient_id,
+      med_prescribed,
+      COUNT(*) AS med_count,
+      ROW_NUMBER() OVER (PARTITION BY patient_id ORDER BY COUNT(*) DESC) AS rnk
+    FROM `project-38fcb11f-322f-4c8e-bd0.Clinipet_Integration.Visit_clean`
+    GROUP BY patient_id, med_prescribed
+  )
+SELECT
+  d.patient_id,
+  d.diagnosis AS top_diagnosis,
+  d.diagnosis_count,
+  m.med_prescribed AS top_med_prescribed,
+  m.med_count
+FROM diagnosis_counts d
+JOIN med_counts m
+  USING (patient_id)
+WHERE d.rnk = 1 AND m.rnk = 1
+ORDER BY d.diagnosis_count DESC;
+
+/*-- 2.Doctor workload and Revenue earned*/
+SELECT
+  doctor,
+  COUNT(*) AS visits,
+  ROUND(SUM(med_cost), 2) AS revenue,
+  ROUND(SUM(med_cost) / COUNT(*), 2) AS revenue_per_visit
+FROM `project-38fcb11f-322f-4c8e-bd0.Clinipet_Integration.Visit_clean`
+GROUP BY doctor
+ORDER BY revenue DESC;
+
+/*-- 3.Patient visit frequency / top spenders (retention & high-value patients)*/
+SELECT
+  patient_id,
+  COUNT(*) AS visit_count,
+  ROUND(SUM(med_cost), 2) AS total_spend
+FROM `project-38fcb11f-322f-4c8e-bd0.Clinipet_Integration.Visit_clean`
+GROUP BY patient_id
+ORDER BY total_spend DESC
+LIMIT 10;
+
+/*--Top diagnoses by volume and cost*/
+SELECT
+  diagnosis,
+  COUNT(*) AS visits,
+  ROUND(AVG(med_cost), 2) AS avg_cost_per_visit,
+  ROUND(SUM(med_cost), 2) AS total_cost
+FROM `project-38fcb11f-322f-4c8e-bd0.Clinipet_Integration.Visit_clean`
+GROUP BY diagnosis
+ORDER BY visits DESC
+LIMIT 10;
+
+/*--Unique Patients*/
+SELECT 
+  COUNT(DISTINCT patient_id) AS total_unique_patients
+FROM `project-38fcb11f-322f-4c8e-bd0.Clinipet_Integration.Registration_clean`;
+
+
+
+/*--Highest health issue to the pet type*/
+SELECT
+  r.pet_type,
+  d.diagnosis AS highest_health_issue,
+  COUNT(*) AS total_diagnoses
+FROM `project-38fcb11f-322f-4c8e-bd0.Clinipet_Integration.Registration_clean` r
+INNER JOIN `project-38fcb11f-322f-4c8e-bd0.Clinipet_Integration.Visit_clean` d
+  ON r.patient_id = d.patient_id
+GROUP BY r.pet_type, highest_health_issue
+ORDER BY total_diagnoses DESC
+LIMIT 1;
